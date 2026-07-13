@@ -98,6 +98,7 @@
     width:56px; height:56px; border-radius:8px; object-fit:cover; float:left; margin-right:12px;
     border:1px solid var(--line);
   }
+  .markerCard .thumb.missing{ border:1px dashed var(--brass); }
   .markerCard .titleRow{display:flex; align-items:baseline; gap:8px; flex-wrap:wrap;}
   .markerCard h3{margin:0 0 3px; font-size:15px; font-weight:600; color:var(--paper);}
   .markerCard .dateBadge{
@@ -145,6 +146,10 @@
     object-fit:cover; opacity:0.55; pointer-events:none;
     mix-blend-mode:normal; transform-origin:50% 50%;
   }
+  /* When showing the "missing image" placeholder, force full opacity and
+     ignore rotation/blend settings so the message is always legible —
+     it's meant to be noticed, not blended into a scene. */
+  #overlayImg.missing{ opacity:1 !important; transform:none !important; }
   #edgeCanvas{
     position:absolute; inset:0; width:100%; height:100%; pointer-events:none; display:none;
   }
@@ -229,6 +234,7 @@
     width:52px; height:52px; border-radius:8px; overflow:hidden; border:2px solid rgba(231,227,214,0.5);
     box-shadow:0 3px 8px rgba(0,0,0,0.5);
   }
+  .lmThumb.missing{ border:2px dashed var(--brass); }
   .lmThumb img{width:100%; height:100%; object-fit:cover; display:block;}
   .lmLabel{font-size:9px; text-align:center; color:var(--paper-dim); margin-top:2px; max-width:52px;}
 
@@ -372,6 +378,44 @@
      onMarkerTap, openAr below).
   --------------------------------------------------------- */
   var markers = [];
+
+  /* ---------------------------------------------------------
+     MISSING IMAGE FALLBACK
+     ----------------------------------------------------------
+     If a marker's `photo` (or a landmark's `photo`) is blank, or the
+     path is wrong, or the file failed to load for any reason, every
+     <img> in the app shows this placeholder instead of a broken-image
+     icon. It's an inline SVG data URI, so it works fully offline —
+     no extra file to ship or forget to include.
+  --------------------------------------------------------- */
+  var MISSING_IMAGE_SVG = 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" viewBox="0 0 400 300">' +
+      '<rect width="400" height="300" fill="#1c2521"/>' +
+      '<rect x="1" y="1" width="398" height="298" fill="none" stroke="#b98a3d" stroke-width="2" stroke-dasharray="8 6"/>' +
+      '<text x="200" y="138" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="16" font-weight="600" fill="#e7e3d6" text-anchor="middle">Image not available</text>' +
+      '<text x="200" y="162" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="12" fill="#b98a3d" text-anchor="middle">If you\u2019re seeing this, the photo is missing,</text>' +
+      '<text x="200" y="180" font-family="-apple-system,Helvetica,Arial,sans-serif" font-size="12" fill="#b98a3d" text-anchor="middle">the path is wrong, or it failed to load.</text>' +
+    '</svg>'
+  );
+
+  /* Sets img.src to `path`, falling back to the placeholder above if
+     `path` is empty/missing, or if the browser fails to load it (bad
+     filename, wrong folder, file never got uploaded, etc). Safe to
+     call with undefined/empty strings. */
+  function setImageWithFallback(imgEl, path){
+    if(!path){
+      imgEl.src = MISSING_IMAGE_SVG;
+      imgEl.classList.add('missing');
+      return;
+    }
+    imgEl.classList.remove('missing');
+    imgEl.onerror = function(){
+      imgEl.onerror = null; // avoid any loop if the placeholder itself somehow errored
+      imgEl.src = MISSING_IMAGE_SVG;
+      imgEl.classList.add('missing');
+    };
+    imgEl.src = path;
+  }
 
   var MARKERS_FALLBACK = [
     {
@@ -520,18 +564,26 @@
   var STYLE_BY_CODE = {
     g: { type:'polygon', fill:'rgba(94,160,137,0.16)',  stroke:'rgba(94,160,137,0.30)',  lineWidth:1 },
     w: { type:'polygon', fill:'rgba(74,144,217,0.30)',  stroke:'rgba(74,144,217,0.55)',  lineWidth:1.5 },
+    v: { type:'line',    stroke:'rgba(74,144,217,0.55)', lineWidth:9, cap:'round' }, // waterway centerline (river/stream) — NOT a closed polygon, so drawn as a thick line rather than filled
     b: { type:'polygon', fill:'rgba(231,227,214,0.10)', stroke:'rgba(231,227,214,0.35)', lineWidth:1 },
     f: { type:'line',    stroke:'rgba(185,138,61,0.55)', lineWidth:2, dash:[1,5] },
     x: { type:'line',    stroke:'rgba(231,227,214,0.85)', lineWidth:7, cap:'butt' },
     r: { type:'line',    stroke:'rgba(231,227,214,0.28)', lineWidth:4 },
     R: { type:'line',    stroke:'rgba(231,227,214,0.4)',  lineWidth:5.5 }
   };
-  // Draw order: earlier = underneath. Matches the code groupings above.
-  var DRAW_ORDER = ['g','w','b','f','x','r','R'];
+  // Draw order: earlier = underneath. 'v' sits with 'w' (both water-toned) but
+  // is drawn just after so its line renders on top of any adjacent water polygon.
+  var DRAW_ORDER = ['g','w','v','b','f','x','r','R'];
 
   function classifyXmlTags(tags){
     if(tags.leisure === 'park' || ['grass','forest','recreation_ground','meadow'].indexOf(tags.landuse) !== -1) return 'g';
-    if(tags.natural === 'water' || ['river','riverbank','stream'].indexOf(tags.waterway) !== -1) return 'w';
+    // true closed water polygons (ponds, ponds-as-riverbank, lakes) get filled;
+    // waterway centerlines (river/stream — usually just a line of nodes tracing
+    // the middle of the waterway, NOT a closed shape) get drawn as a thick line
+    // instead. Filling an open line as a polygon is what caused the previous
+    // "bowtie/triangle" rendering bug on the Avon River.
+    if(tags.natural === 'water' || tags.waterway === 'riverbank') return 'w';
+    if(['river','stream'].indexOf(tags.waterway) !== -1) return 'v';
     if(tags.building) return 'b';
     if(tags.bridge === 'yes') return 'x';
     if(['footway','path','pedestrian'].indexOf(tags.highway) !== -1) return 'f';
@@ -781,7 +833,7 @@
   --------------------------------------------------------- */
   function onMarkerTap(m){
     state.activeMarker = m;
-    document.getElementById('cardThumb').src = m.photo;
+    setImageWithFallback(document.getElementById('cardThumb'), m.photo);
     document.getElementById('cardTitle').textContent = m.title;
 
     var dateEl = document.getElementById('cardDate');
@@ -928,7 +980,8 @@
     document.querySelector('.arTitle .yr').textContent =
       (m.date || (m.year ? String(m.year) : '')) +
       (typeof m.bearing === 'number' ? ' · bearing ' + m.bearing + '°' : '');
-    overlayImg.src = m.photo;
+    overlayImg.onerror = null; // clear any stale handler from a previous marker before re-attaching
+    setImageWithFallback(overlayImg, m.photo);
     buildLandmarkStrip(m);
 
     // fresh marker -> fresh rotation, locked at 0°, and back to blend mode
@@ -1159,7 +1212,14 @@
       var thumb = document.createElement('div');
       thumb.className = 'lmThumb';
       var img = document.createElement('img');
-      img.src = lm.photo;
+      setImageWithFallback(img, lm.photo);
+      // mirror the missing-state onto the thumb wrapper too, so the dashed
+      // border shows around the full square, not just inside the <img>
+      if(!lm.photo){
+        thumb.classList.add('missing');
+      } else {
+        img.addEventListener('error', function(){ thumb.classList.add('missing'); });
+      }
       thumb.appendChild(img);
       var label = document.createElement('div');
       label.className = 'lmLabel';
@@ -1250,7 +1310,7 @@
     origin.lon = markers[0].lon;
 
     state.activeMarker = markers[0];
-    document.getElementById('cardThumb').src = markers[0].photo;
+    setImageWithFallback(document.getElementById('cardThumb'), markers[0].photo);
 
     drawMap(); // pins didn't exist until now — draw them in
   }
