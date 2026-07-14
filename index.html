@@ -428,6 +428,48 @@
     padding:5px 12px; font-size:11px; color:var(--paper-dim); z-index:5; white-space:nowrap;
   }
   .accuracyBadge b{color:var(--brass); font-weight:600;}
+
+  /* ---------- CAPTURE (live readout + shutter button) ---------- */
+  .captureReadout{
+    position:absolute; left:12px; top:calc(env(safe-area-inset-top,0px) + 100px);
+    background:rgba(20,27,24,0.85); border:1px solid var(--line); border-radius:10px;
+    padding:8px 10px; z-index:5; font-variant-numeric:tabular-nums;
+  }
+  .captureReadoutRow{display:flex; gap:10px; justify-content:space-between; font-size:10.5px; padding:2px 0;}
+  .captureReadoutRow span{color:var(--paper-dim); text-transform:uppercase; letter-spacing:0.04em;}
+  .captureReadoutRow b{color:var(--paper); font-weight:600; white-space:nowrap;}
+
+  .captureBtnWrap{
+    position:absolute; left:50%; bottom:calc(env(safe-area-inset-bottom,0px) + 22px);
+    transform:translateX(-50%); z-index:6;
+  }
+  .captureBtn{
+    width:64px; height:64px; border-radius:50%; background:rgba(255,255,255,0.08);
+    border:3px solid var(--paper); cursor:pointer; position:relative;
+  }
+  .captureBtn::after{
+    content:''; position:absolute; inset:5px; border-radius:50%; background:var(--paper);
+  }
+  .captureBtn:active::after{background:var(--brass);}
+
+  /* ---------- CAPTURE REVIEW SCREEN ---------- */
+  #captureReviewScreen{background:#000;}
+  .captureReviewStage{position:absolute; inset:0; background:#0a0d0b;}
+  #capturedPhotoImg{position:absolute; inset:0; width:100%; height:100%; object-fit:contain;}
+  .captureMetaPanel{
+    position:absolute; left:0; right:0; bottom:0;
+    background:linear-gradient(to top, rgba(0,0,0,0.85), rgba(0,0,0,0.55) 85%, transparent);
+    padding:16px 16px calc(env(safe-area-inset-bottom,0px) + 18px);
+    max-height:56vh; overflow-y:auto;
+  }
+  .captureMetaGrid{
+    display:grid; grid-template-columns:1fr 1fr; gap:8px 14px; margin-bottom:12px;
+    background:rgba(20,27,24,0.75); border:1px solid var(--line); border-radius:10px; padding:12px;
+  }
+  .captureMetaItem{display:flex; flex-direction:column; gap:1px;}
+  .captureMetaItem .k{font-size:10px; text-transform:uppercase; letter-spacing:0.05em; color:var(--brass);}
+  .captureMetaItem .v{font-size:12.5px; color:var(--paper); font-variant-numeric:tabular-nums;}
+  .captureMetaNote{font-size:11.5px; color:var(--paper-dim); line-height:1.5; margin-bottom:14px;}
 </style>
 </head>
 <body>
@@ -569,6 +611,16 @@
 
     <div class="accuracyBadge" id="accuracyBadge">GPS ±<b id="accVal">—</b> m</div>
 
+    <div class="captureReadout" id="captureReadout">
+      <div class="captureReadoutRow"><span>Lat/Lon</span><b id="roLatLon">—</b></div>
+      <div class="captureReadoutRow"><span>Heading</span><b id="roHeading">—</b></div>
+      <div class="captureReadoutRow"><span>Tilt</span><b id="roTilt">—</b></div>
+    </div>
+
+    <div class="captureBtnWrap">
+      <div class="captureBtn" id="captureBtn" title="Capture photo + location data"></div>
+    </div>
+
     <div class="landmarkStrip" id="landmarkStrip">
       <!-- filled by JS -->
     </div>
@@ -594,6 +646,35 @@
         <div class="modeBtn active" data-mode="blend">Blend</div>
         <div class="modeBtn" data-mode="edges">Edge trace</div>
         <div class="modeBtn" data-mode="split">Split</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= CAPTURE REVIEW SCREEN
+       Shown right after tapping the capture button on the AR screen.
+       Freezes the live camera frame, shows it alongside everything
+       recorded at that instant (GPS, heading, tilt, timestamp), and
+       lets you download the photo + a matching metadata file. ================= -->
+  <div class="screen" id="captureReviewScreen">
+    <div class="captureReviewStage">
+      <img id="capturedPhotoImg" src="" alt="Captured photo">
+    </div>
+
+    <div class="arTop">
+      <div class="backBtn" id="captureReviewBackBtn">‹</div>
+      <div class="arTitle">
+        <div class="name">Review capture</div>
+        <div class="yr" id="captureReviewSubtitle">—</div>
+      </div>
+      <div style="width:38px;"></div>
+    </div>
+
+    <div class="captureMetaPanel">
+      <div class="captureMetaGrid" id="captureMetaGrid"><!-- filled by JS --></div>
+      <div class="captureMetaNote" id="captureMetaNote"></div>
+      <div class="row">
+        <button class="btn" id="downloadCaptureBtn">Download photo + data</button>
+        <button class="btn secondary" id="discardCaptureBtn">Discard &amp; retake</button>
       </div>
     </div>
   </div>
@@ -827,6 +908,8 @@
   var state = {
     userLat: null, userLon: null, userAcc: null,
     heading: null,
+    tiltBeta: null,  // front-back tilt, degrees (0 = flat, 90 = upright/vertical)
+    tiltGamma: null, // left-right tilt, degrees
     activeMarker: null, // set once markers.json (or fallback) loads
     watchId: null,
     mapScale: 6, // meters per... derived dynamically, see draw()
@@ -1712,6 +1795,7 @@
     gpsStatusEl.innerHTML = '<span class="dot"></span>±' + Math.round(state.userAcc) + ' m';
     document.getElementById('accVal').textContent = Math.round(state.userAcc);
     drawMap();
+    updateCaptureReadout();
   }
   function onPositionError(err){
     gpsStatusEl.classList.remove('locked');
@@ -1782,6 +1866,9 @@
       updateCompassArrow();
       renderUserDOM();
     }
+    if(typeof e.beta === 'number') state.tiltBeta = e.beta;
+    if(typeof e.gamma === 'number') state.tiltGamma = e.gamma;
+    updateCaptureReadout();
   }
   function updateCompassArrow(){
     var arrow = document.getElementById('compassArrow');
@@ -2082,10 +2169,12 @@
     requestOrientationPermission();
   }
 
+  var captureReviewScreen = document.getElementById('captureReviewScreen');
   function switchScreen(which){
     mapScreen.classList.toggle('active', which === 'map');
     arScreen.classList.toggle('active', which === 'ar');
     compareScreen.classList.toggle('active', which === 'compare');
+    captureReviewScreen.classList.toggle('active', which === 'capturereview');
   }
 
   document.getElementById('arBackBtn').addEventListener('click', function(){
@@ -2139,6 +2228,150 @@
     }
   }
   document.getElementById('retryCamBtn').addEventListener('click', startCamera);
+
+  /* ---------------------------------------------------------
+     CAPTURE — freeze the live camera frame and record everything
+     available about that exact moment (GPS, compass heading, device
+     tilt, and the actual camera resolution/aspect the browser used).
+     ----------------------------------------------------------
+     HONESTY NOTE ON "FOV / ZOOM": browsers don't expose a phone's true
+     optical field-of-view or zoom level through getUserMedia — there's
+     no standard API for it. What IS real and gets recorded here is the
+     actual capture resolution and aspect ratio (via the video track's
+     getSettings()), plus whether any digital zoom constraint was applied.
+     If you need true FOV later, that has to come from the photo's EXIF
+     (most phone camera apps write it) rather than from a web page.
+  --------------------------------------------------------- */
+  var lastCapture = null; // { blob, dataUrl, meta }
+
+  function updateCaptureReadout(){
+    var readout = document.getElementById('captureReadout');
+    if(!readout || arScreen.classList.contains('active') === false) return;
+
+    document.getElementById('roLatLon').textContent =
+      state.userLat != null ? state.userLat.toFixed(5) + ', ' + state.userLon.toFixed(5) : '—';
+    document.getElementById('roHeading').textContent =
+      state.heading != null ? Math.round(state.heading) + '°' : '—';
+
+    var tiltText = '—';
+    if(state.tiltBeta != null && state.tiltGamma != null){
+      tiltText = Math.round(state.tiltBeta) + '° / ' + Math.round(state.tiltGamma) + '°';
+    }
+    document.getElementById('roTilt').textContent = tiltText;
+  }
+
+  document.getElementById('captureBtn').addEventListener('click', function(){
+    if(!camStream || !video.videoWidth){
+      showErrorBanner(
+        'Nothing to capture yet',
+        'The camera hasn\'t finished starting up. Wait a moment for the live view to appear, then try again.'
+      );
+      return;
+    }
+
+    // freeze the current video frame onto a canvas at its native resolution
+    var canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    var track = camStream.getVideoTracks()[0];
+    var settings = track && track.getSettings ? track.getSettings() : {};
+
+    var meta = {
+      capturedAt: new Date().toISOString(),
+      forMarkerId: state.activeMarker ? state.activeMarker.id : null,
+      forMarkerTitle: state.activeMarker ? state.activeMarker.title : null,
+      gps: {
+        lat: state.userLat, lon: state.userLon, accuracyMeters: state.userAcc
+      },
+      compassHeadingDeg: state.heading,
+      deviceTilt: { betaDeg: state.tiltBeta, gammaDeg: state.tiltGamma },
+      camera: {
+        pixelWidth: settings.width || canvas.width,
+        pixelHeight: settings.height || canvas.height,
+        aspectRatio: settings.aspectRatio || (canvas.width / canvas.height),
+        facingMode: settings.facingMode || null,
+        zoom: typeof settings.zoom === 'number' ? settings.zoom : null
+        // true optical FOV isn't available via getUserMedia — see note above.
+      },
+      note: 'Field of view / true optical zoom isn\'t available from a web browser camera API. Pixel resolution and any digital zoom level are recorded above instead; for exact FOV, check the photo\'s EXIF if your camera app writes it.'
+    };
+
+    canvas.toBlob(function(blob){
+      var dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+      lastCapture = { blob: blob, dataUrl: dataUrl, meta: meta };
+      showCaptureReview();
+    }, 'image/jpeg', 0.92);
+  });
+
+  function showCaptureReview(){
+    if(!lastCapture) return;
+    document.getElementById('capturedPhotoImg').src = lastCapture.dataUrl;
+    document.getElementById('captureReviewSubtitle').textContent =
+      lastCapture.meta.forMarkerTitle || 'Untitled capture';
+
+    var grid = document.getElementById('captureMetaGrid');
+    grid.innerHTML = '';
+    function addItem(label, value){
+      var el = document.createElement('div');
+      el.className = 'captureMetaItem';
+      el.innerHTML = '<span class="k">' + label + '</span><span class="v">' + value + '</span>';
+      grid.appendChild(el);
+    }
+    var m = lastCapture.meta;
+    addItem('Latitude', m.gps.lat != null ? m.gps.lat.toFixed(6) : '—');
+    addItem('Longitude', m.gps.lon != null ? m.gps.lon.toFixed(6) : '—');
+    addItem('GPS accuracy', m.gps.accuracyMeters != null ? '±' + Math.round(m.gps.accuracyMeters) + ' m' : '—');
+    addItem('Heading', m.compassHeadingDeg != null ? Math.round(m.compassHeadingDeg) + '°' : '—');
+    addItem('Tilt (front-back)', m.deviceTilt.betaDeg != null ? Math.round(m.deviceTilt.betaDeg) + '°' : '—');
+    addItem('Tilt (left-right)', m.deviceTilt.gammaDeg != null ? Math.round(m.deviceTilt.gammaDeg) + '°' : '—');
+    addItem('Resolution', m.camera.pixelWidth + ' × ' + m.camera.pixelHeight);
+    addItem('Captured', new Date(m.capturedAt).toLocaleString());
+
+    document.getElementById('captureMetaNote').textContent = m.note;
+
+    switchScreen('capturereview');
+  }
+
+  document.getElementById('captureReviewBackBtn').addEventListener('click', function(){
+    switchScreen('ar');
+  });
+  document.getElementById('discardCaptureBtn').addEventListener('click', function(){
+    lastCapture = null;
+    switchScreen('ar');
+  });
+
+  document.getElementById('downloadCaptureBtn').addEventListener('click', function(){
+    if(!lastCapture) return;
+    var markerId = lastCapture.meta.forMarkerId || 'capture';
+    var stamp = lastCapture.meta.capturedAt.replace(/[:.]/g, '-');
+    var baseName = markerId + '_' + stamp;
+
+    // photo download
+    var a1 = document.createElement('a');
+    a1.href = URL.createObjectURL(lastCapture.blob);
+    a1.download = baseName + '.jpg';
+    document.body.appendChild(a1);
+    a1.click();
+    document.body.removeChild(a1);
+
+    // sidecar metadata download (same base filename, .json extension —
+    // matches the photo so it's easy to tell which metadata goes with
+    // which image once both are sitting in your downloads folder)
+    var jsonBlob = new Blob([JSON.stringify(lastCapture.meta, null, 2)], { type: 'application/json' });
+    var a2 = document.createElement('a');
+    a2.href = URL.createObjectURL(jsonBlob);
+    a2.download = baseName + '.json';
+    document.body.appendChild(a2);
+    a2.click();
+    document.body.removeChild(a2);
+
+    showErrorBanner(
+      'Saved — next step',
+      'Both files downloaded: ' + baseName + '.jpg and .json. Move the photo into your app\'s "photos" folder and reference it as the "afterPhoto" field for this marker in markers.json — the .json file has the exact numbers if you want to note them in the description.'
+    );
+  });
 
   /* ---- opacity slider ---- */
   document.getElementById('opacitySlider').addEventListener('input', function(e){
